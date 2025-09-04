@@ -25,3 +25,9 @@ async def notion_update_page(page_id: str, payload: dict):
         r = await client.patch(f"{NOTION_BASE}/pages/{page_id}", headers=HEADERS, json=payload)
         r.raise_for_status()
         return r.json()
+
+async def notion_get_database(db_id: str):
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(f"{NOTION_BASE}/databases/{db_id}", headers=HEADERS)
+        r.raise_for_status()
+        return r.json()
