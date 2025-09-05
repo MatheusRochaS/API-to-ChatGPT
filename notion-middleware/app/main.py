@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, Dict, Any, List
 from pydantic import BaseModel
@@ -9,6 +9,7 @@ from .auth import check_auth
 from . import notion_client as notion
 from . import db_registry
 from . import schema_cache
+from . import tree_index
 
 class DBMap(BaseModel):
     map: Dict[str, str]  # {"projects":"<id>", "tasks":"<id>", ...}
@@ -39,6 +40,9 @@ class DBQuery(BaseModel):
     sorts: Optional[List[SortItem]] = None
     page_size: Optional[int] = 50
 # --- MODELOS NOVOS ---
+
+class TreeIndexRequest(BaseModel):
+    root_page_id: str
 
 app = FastAPI(
     title="ChatGPT ↔ Notion Middleware",
@@ -251,3 +255,24 @@ async def db_query(body: DBQuery, authorization: Optional[str] = Header(default=
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 # --- ENDPOINTS GENÉRICOS ---
+
+@app.post("/tree.index")
+async def tree_index_build(body: TreeIndexRequest, authorization: Optional[str] = Header(default=None)):
+    check_auth(authorization)
+    idx = await tree_index.build_index(body.root_page_id)
+    return {"ok": True, "nodes": len(idx.get("nodes", {})), "created_at": idx["created_at"]}
+
+@app.get("/tree.lookup")
+async def tree_lookup(q: str = Query(..., description="title or path like A/B/C"),
+                      authorization: Optional[str] = Header(default=None)):
+    check_auth(authorization)
+    node = tree_index.resolve_by_title_or_path(q)
+    if not node:
+        raise HTTPException(404, f"Not found in index: {q}. Reindex if structure changed.")
+    return node
+
+@app.get("/tree.index.info")
+async def tree_index_info(authorization: Optional[str] = Header(default=None)):
+    check_auth(authorization)
+    data = tree_index.get_index()
+    return {"created_at": data.get("created_at"), "nodes": len(data.get("nodes", {})), "root": data.get("root")}
