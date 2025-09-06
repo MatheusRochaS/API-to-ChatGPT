@@ -4,3 +4,23 @@ expertMode = true
 
 [nix]
 channel = "stable-25_05"
+
+[workflows]
+runButton = "Inicio"
+
+[[workflows.workflow]]
+name = "Inicio"
+mode = "sequential"
+author = 4178835
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pip install -r notion-middleware/requirements.txt"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "uvicorn notion-middleware.app.main:app --host 0.0.0.0 --port 8000"
+
+[[ports]]
+localPort = 8000
+externalPort = 80
