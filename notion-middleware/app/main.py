@@ -275,6 +275,16 @@ async def tree_index_build(body: TreeIndexRequest, authorization: Optional[str] 
     idx = await tree_index.build_index(body.root_page_id)
     return {"ok": True, "nodes": len(idx.get("nodes", {})), "created_at": idx["created_at"]}
 
+@app.get("/tree.search")
+async def tree_search(q: str, limit: int = 10, authorization: Optional[str] = Header(default=None)):
+    """
+    Busca leve no índice por substring (case-insensitive).
+    Retorna uma lista de nós {id, type, title, parent_id}.
+    """
+    check_auth(authorization)
+    results = tree_index.search(q, limit)
+    return {"count": len(results), "results": results}
+
 @app.post("/tree.index.bootstrap")
 async def tree_index_bootstrap(authorization: Optional[str] = Header(default=None)):
     """

@@ -1,6 +1,6 @@
 # app/tree_index.py
 import os, json, time
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from . import notion_client as notion
 
 INDEX_PATH = os.getenv("TREE_INDEX_PATH", "/tmp/page_index.json")
@@ -64,6 +64,7 @@ async def _walk_and_collect(root_page_id: str) -> Dict[str, Any]:
             data = await notion.notion_list_children(page_id, start_cursor=cursor)
             for blk in data.get("results", []):
                 typ = blk.get("type")
+
                 if typ == "child_page":
                     cid = blk["id"]
                     ctitle = blk.get("child_page", {}).get("title") or "Untitled"
@@ -74,6 +75,7 @@ async def _walk_and_collect(root_page_id: str) -> Dict[str, Any]:
                         "parent_id": page_id,
                     }
                     await walk(cid, page_id)
+
                 elif typ == "child_database":
                     did = blk["id"]
                     dtitle = blk.get("child_database", {}).get("title") or "Database"
@@ -83,6 +85,52 @@ async def _walk_and_collect(root_page_id: str) -> Dict[str, Any]:
                         "title": dtitle,
                         "parent_id": page_id,
                     }
+
+                # >>> NOVO: também indexar links para páginas / bancos (link_to_page)
+                elif typ == "link_to_page":
+                    link = blk.get("link_to_page", {}) or {}
+
+                    # link para PÁGINA
+                    if link.get("page_id"):
+                        lpid = link["page_id"]
+                        ltitle = "Untitled"
+                        try:
+                            p = await notion.notion_retrieve_page(lpid)
+                            ltitle = notion.get_page_title(p) or "Untitled"
+                        except Exception:
+                            pass
+                        nodes[lpid] = {
+                            "id": lpid,
+                            "type": "page",
+                            "title": ltitle,
+                            "parent_id": page_id,
+                        }
+                        # seguir o link (opcional, aqui seguimos para indexar a árvore real)
+                        await walk(lpid, page_id)
+
+                    # link para DATABASE
+                    elif link.get("database_id"):
+                        ldid = link["database_id"]
+                        ltitle = "Database"
+                        # tenta obter o title do DB (se você tiver helper para isso)
+                        try:
+                            if hasattr(notion, "notion_retrieve_database"):
+                                meta = await notion.notion_retrieve_database(ldid)
+                                # título de database vem como rich_text
+                                if isinstance(meta, dict):
+                                    tarr = meta.get("title", [])
+                                    if isinstance(tarr, list) and tarr:
+                                        ltitle = "".join([t.get("plain_text", "") for t in tarr]) or "Database"
+                        except Exception:
+                            pass
+
+                        nodes[ldid] = {
+                            "id": ldid,
+                            "type": "database",
+                            "title": ltitle,
+                            "parent_id": page_id,
+                        }
+
             if not data.get("has_more"):
                 break
             cursor = data.get("next_cursor")
@@ -171,3 +219,29 @@ def resolve_by_title_or_path(q: str) -> Optional[Dict[str, Any]]:
                 return cand
 
     return None
+
+
+# --------------- Busca leve (substring) -----------------
+
+def search(q: str, limit: int = 10) -> List[Dict[str, Any]]:
+    """
+    Retorna até `limit` nós cujo título contém o termo (case-insensitive).
+    """
+    data = _load()
+    nodes = data.get("nodes", {})
+    ql = (q or "").strip().lower()
+    if not ql:
+        return []
+
+    matches = []
+    for n in nodes.values():
+        title = (n.get("title") or "").strip()
+        if ql in title.lower():
+            matches.append(n)
+
+    # ordena por: começa com termo > contém termo
+    matches.sort(key=lambda n: (
+        0 if (n.get("title","").lower().startswith(ql)) else 1,
+        n.get("title","").lower()
+    ))
+    return matches[: max(1, int(limit))]
