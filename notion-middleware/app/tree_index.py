@@ -44,11 +44,15 @@ async def _walk_and_collect(root_page_id: str) -> Dict[str, Any]:
     """
     Retorna apenas os nodes desta raiz (não salva).
     nodes[id] = { id, type: "page"|"database", title, parent_id }
+    Varre recursivamente:
+      - páginas
+      - qualquer bloco que tenha filhos (has_children)
+      - child_page, child_database e link_to_page
     """
     nodes: Dict[str, Any] = {}
 
     async def walk(page_id: str, parent_id: Optional[str]):
-        # page para pegar título
+        # 1) registra a própria página
         page = await notion.notion_retrieve_page(page_id)
         title = notion.get_page_title(page)
         nodes[page_id] = {
@@ -58,82 +62,91 @@ async def _walk_and_collect(root_page_id: str) -> Dict[str, Any]:
             "parent_id": parent_id,
         }
 
-        # filhos (blocks) — paginação
-        cursor = None
-        while True:
-            data = await notion.notion_list_children(page_id, start_cursor=cursor)
-            for blk in data.get("results", []):
-                typ = blk.get("type")
+        # 2) processa os filhos de um BLOCO genérico (serve para nested blocks)
+        async def walk_block_children(block_id: str, parent_of_found: str):
+            cursor = None
+            while True:
+                data = await notion.notion_list_children(block_id, start_cursor=cursor)
+                for blk in data.get("results", []):
+                    typ = blk.get("type")
 
-                if typ == "child_page":
-                    cid = blk["id"]
-                    ctitle = blk.get("child_page", {}).get("title") or "Untitled"
-                    nodes[cid] = {
-                        "id": cid,
-                        "type": "page",
-                        "title": ctitle,
-                        "parent_id": page_id,
-                    }
-                    await walk(cid, page_id)
-
-                elif typ == "child_database":
-                    did = blk["id"]
-                    dtitle = blk.get("child_database", {}).get("title") or "Database"
-                    nodes[did] = {
-                        "id": did,
-                        "type": "database",
-                        "title": dtitle,
-                        "parent_id": page_id,
-                    }
-
-                # >>> NOVO: também indexar links para páginas / bancos (link_to_page)
-                elif typ == "link_to_page":
-                    link = blk.get("link_to_page", {}) or {}
-
-                    # link para PÁGINA
-                    if link.get("page_id"):
-                        lpid = link["page_id"]
-                        ltitle = "Untitled"
-                        try:
-                            p = await notion.notion_retrieve_page(lpid)
-                            ltitle = notion.get_page_title(p) or "Untitled"
-                        except Exception:
-                            pass
-                        nodes[lpid] = {
-                            "id": lpid,
+                    # a) páginas filhas "reais"
+                    if typ == "child_page":
+                        cid = blk["id"]
+                        ctitle = blk.get("child_page", {}).get("title") or "Untitled"
+                        nodes[cid] = {
+                            "id": cid,
                             "type": "page",
-                            "title": ltitle,
-                            "parent_id": page_id,
+                            "title": ctitle,
+                            "parent_id": parent_of_found,
                         }
-                        # seguir o link (opcional, aqui seguimos para indexar a árvore real)
-                        await walk(lpid, page_id)
+                        await walk(cid, parent_of_found)
 
-                    # link para DATABASE
-                    elif link.get("database_id"):
-                        ldid = link["database_id"]
-                        ltitle = "Database"
-                        # tenta obter o title do DB (se você tiver helper para isso)
-                        try:
-                            if hasattr(notion, "notion_retrieve_database"):
-                                meta = await notion.notion_retrieve_database(ldid)
-                                # título de database vem como rich_text
-                                if isinstance(meta, dict):
-                                    tarr = meta.get("title", [])
-                                    if isinstance(tarr, list) and tarr:
-                                        ltitle = "".join([t.get("plain_text", "") for t in tarr]) or "Database"
-                        except Exception:
-                            pass
-
-                        nodes[ldid] = {
-                            "id": ldid,
+                    # b) bancos embutidos/filhos
+                    elif typ == "child_database":
+                        did = blk["id"]
+                        dtitle = blk.get("child_database", {}).get("title") or "Database"
+                        nodes[did] = {
+                            "id": did,
                             "type": "database",
-                            "title": ltitle,
-                            "parent_id": page_id,
+                            "title": dtitle,
+                            "parent_id": parent_of_found,
                         }
 
-            if not data.get("has_more"):
-                break
-            cursor = data.get("next_cursor")
+                    # c) links para página ou database
+                    elif typ == "link_to_page":
+                        link = blk.get("link_to_page", {}) or {}
+                        # link para PÁGINA
+                        if link.get("page_id"):
+                            lpid = link["page_id"]
+                            ltitle = "Untitled"
+                            try:
+                                p = await notion.notion_retrieve_page(lpid)
+                                ltitle = notion.get_page_title(p) or "Untitled"
+                            except Exception:
+                                pass
+                            nodes[lpid] = {
+                                "id": lpid,
+                                "type": "page",
+                                "title": ltitle,
+                                "parent_id": parent_of_found,
+                            }
+                            # segue o link (assim indexamos a árvore real)
+                            await walk(lpid, parent_of_found)
+
+                        # link para DATABASE
+                        elif link.get("database_id"):
+                            ldid = link["database_id"]
+                            ltitle = "Database"
+                            try:
+                                if hasattr(notion, "notion_retrieve_database"):
+                                    meta = await notion.notion_retrieve_database(ldid)
+                                    if isinstance(meta, dict):
+                                        tarr = meta.get("title", [])
+                                        if isinstance(tarr, list) and tarr:
+                                            ltitle = "".join(
+                                                [t.get("plain_text", "") for t in tarr]
+                                            ) or "Database"
+                            except Exception:
+                                pass
+                            nodes[ldid] = {
+                                "id": ldid,
+                                "type": "database",
+                                "title": ltitle,
+                                "parent_id": parent_of_found,
+                            }
+
+                    # d) QUALQUER bloco que tenha filhos — precisamos entrar!
+                    if blk.get("has_children"):
+                        # alguns blocos “container” (toggle, synced_block, column, callout, etc.) guardam páginas/databases lá dentro
+                        await walk_block_children(blk["id"], parent_of_found)
+
+                if not data.get("has_more"):
+                    break
+                cursor = data.get("next_cursor")
+
+        # 3) varre os filhos da PÁGINA (que também é um "bloco raiz")
+        await walk_block_children(page_id, page_id)
 
     await walk(root_page_id, None)
     return nodes
